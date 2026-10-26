@@ -124,7 +124,7 @@ async function applicants(){
   for (const d of snap.docs){
     const m = d.data();
     if (m.status === 'pending'){
-      const c = await pushTo([r.owner, ...r.reviewers], '새 회원 가입 신청', `${m.name || ''}님 (${m.dong || ''}) — 승인 또는 불가를 선택해 주세요`, 'admin', 'apply-' + d.id);
+      const c = await pushTo([r.owner, ...r.reviewers], '새 회원 가입 신청', `${m.name || ''}님 (${m.dong || ''}) — 승인 또는 불가를 선택해 주세요`, 'review', 'apply-' + d.id);
       log('가입 신청', m.name, c + '대');
     }
     await d.ref.update({ notified: true });
@@ -138,7 +138,7 @@ async function welcomes(){
     const m = d.data();
     if (m.status === 'approved'){
       const where = m.area ? ` · ${m.area}${m.lead ? ' 대표' : ''}로 배치되었습니다` : '';
-      const c = await pushTo([d.id], '의왕의힘33 가입이 승인되었습니다', `${m.name || ''}님 환영합니다${where}. 눌러서 앱을 홈 화면에 설치해 주세요.`, 'roadmap', 'welcome-' + d.id);
+      const c = await pushTo([d.id], '의왕의힘33 회원이 되셨습니다', `${m.name || ''}님 환영합니다${where}. 눌러서 앱을 홈 화면에 설치해 주세요.`, 'roadmap', 'welcome-' + d.id);
       log('가입 승인 알림', m.name, c + '대');
     }
     await d.ref.update({ welcomed: true });
@@ -150,11 +150,11 @@ async function referralsJob(){
   const r = await roles();
   const ask = await db.collection('referrals').where('notified', '==', false).get();
   for (const d of ask.docs){ const x = d.data();
-    const c = await pushTo([x.ref], '추천 의견을 부탁드립니다', `${x.name || '신청자'}님이 회원님의 추천으로 가입을 신청했습니다. 눌러서 추천 사유를 적어 주세요.`, 'me', 'ref-' + d.id);
+    const c = await pushTo([x.ref], '추천 의견을 부탁드립니다', `${x.name || '신청자'}님이 회원님의 추천으로 가입을 신청했습니다. 눌러서 추천 사유와 활동 사진을 올려 주세요.`, 'review', 'ref-' + d.id);
     await d.ref.update({ notified: true }); log('추천 의견 요청', x.name, c + '대'); }
   const got = await db.collection('referrals').where('reasonNew', '==', true).get();
   for (const d of got.docs){ const x = d.data();
-    const c = await pushTo([r.owner, ...r.reviewers], '추천 의견이 도착했습니다', `${x.refName || '추천인'}님이 ${x.name || '신청자'}님 추천 사유를 보냈습니다.`, 'admin', 'refok-' + d.id);
+    const c = await pushTo([r.owner, ...r.reviewers], '추천 의견이 도착했습니다', `${x.refName || '추천인'}님이 ${x.name || '신청자'}님 추천 사유를 보냈습니다.`, 'review', 'refok-' + d.id);
     await d.ref.update({ reasonNew: false }); log('추천 의견 도착', x.name, c + '대'); }
 }
 /* 8) 첫 화면 숫자 다시 세기 (함께하는 시민) */
