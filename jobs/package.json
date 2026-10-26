@@ -1,0 +1,7 @@
+{
+  "name": "uiwang-power-jobs",
+  "private": true,
+  "type": "commonjs",
+  "engines": { "node": ">=20" },
+  "dependencies": { "firebase-admin": "^12.1.0" }
+}
