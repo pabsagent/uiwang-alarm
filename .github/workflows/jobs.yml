@@ -1,0 +1,39 @@
+name: 알림 도우미
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: uiwang-jobs
+  cancel-in-progress: false
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: 준비
+        working-directory: jobs
+        run: npm install --omit=dev --no-audit --no-fund
+      - name: 알림 보내기
+        working-directory: jobs
+        env:
+          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+        run: node run.js
+      - name: 한 달에 한 번 기록 남기기
+        if: github.event_name == 'schedule'
+        run: |
+          month=$(date -u +%Y-%m)
+          if [ "$(cat keepalive.txt 2>/dev/null)" != "$month" ]; then
+            echo "$month" > keepalive.txt
+            git config user.name "uiwang-bot"
+            git config user.email "uiwang-bot@users.noreply.github.com"
+            git add keepalive.txt
+            git commit -m "keepalive $month"
+            git push
+          fi
