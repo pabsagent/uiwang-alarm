@@ -91,6 +91,7 @@ async function rallies(){
   const snap = await db.collection('rallies').where('atMs', '>', NOW - 6 * 3600000).get();
   for (const d of snap.docs){
     const r = d.data(); const sent = r.sent || {}; const upd = {};
+    if (r.law){ if (!sent.created) await d.ref.update({ 'sent.created': true }); continue; }   // 법정 일정은 동행 모집 알림을 보내지 않음
     const meet = r.meetMs || r.atMs;
     if (!sent.created){
       if (r.atMs > NOW){
