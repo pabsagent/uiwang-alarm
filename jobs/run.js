@@ -3,7 +3,8 @@
    2) 유세: 등록 직후 동행 모집 → 회원 전체 / 전날 오후 8시 · 집결 1시간 전 → 동행 신청자
    3) 가입 신청 → 최고 관리자와 검토자에게만
    4) 위원장 페이스북 새 글 → 회원 전체 (페이스북 ‘페이지’ 연결 시 30분마다 새 글 자동 가져오기)
-   5) 관리자가 요청한 회원 비밀번호 초기화 */
+   5) 관리자가 요청한 회원 비밀번호 초기화
+   6) 가입 승인 → 승인된 본인에게 ‘승인 완료’ 알림 (누르면 사이트가 열리고 홈 화면 설치 안내가 나옴) */
 const admin = require('firebase-admin');
 const crypto = require('crypto');
 
@@ -129,6 +130,20 @@ async function applicants(){
   }
 }
 
+/* 6) 가입 승인 알림 → 본인 */
+async function welcomes(){
+  const snap = await db.collection('members').where('welcomed', '==', false).get();
+  for (const d of snap.docs){
+    const m = d.data();
+    if (m.status === 'approved'){
+      const where = m.area ? ` · ${m.area}${m.lead ? ' 대표' : ''}로 배치되었습니다` : '';
+      const c = await pushTo([d.id], '의왕의힘33 가입이 승인되었습니다', `${m.name || ''}님 환영합니다${where}. 눌러서 앱을 홈 화면에 설치해 주세요.`, 'roadmap', 'welcome-' + d.id);
+      log('가입 승인 알림', m.name, c + '대');
+    }
+    await d.ref.update({ welcomed: true });
+  }
+}
+
 /* 4) 페이스북 */
 async function facebook(){
   const cfg = await db.doc('fbconfig/main').get();
@@ -176,7 +191,7 @@ async function resets(){
 }
 
 (async () => {
-  for (const [name, fn] of [['공지', notices], ['유세', rallies], ['가입', applicants], ['페이스북', facebook], ['비밀번호', resets]]){
+  for (const [name, fn] of [['공지', notices], ['유세', rallies], ['가입', applicants], ['페이스북', facebook], ['비밀번호', resets], ['승인 알림', welcomes]]){
     try { await fn(); } catch (e){ console.error(name + ' 처리 중 오류:', e.message); process.exitCode = 1; }
   }
 })();
