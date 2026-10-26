@@ -157,10 +157,24 @@ async function referralsJob(){
     const c = await pushTo([r.owner, ...r.reviewers], '추천 의견이 도착했습니다', `${x.refName || '추천인'}님이 ${x.name || '신청자'}님 추천 사유를 보냈습니다.`, 'review', 'refok-' + d.id);
     await d.ref.update({ reasonNew: false }); log('추천 의견 도착', x.name, c + '대'); }
 }
+/* 9) 비밀번호 찾기 요청 → 최고 관리자·공동 관리자·검토자에게 알림 */
+async function pwHelpJob(){
+  const snap = await db.collection('pwHelp').where('notified', '==', false).get(); if (snap.empty) return;
+  const r = await roles();
+  for (const d of snap.docs){ const x = d.data();
+    const c = await pushTo([r.owner, ...r.admins, ...r.reviewers], '비밀번호 찾기 요청', `${x.name || '회원'}님(${x.loginId || ''})이 비밀번호를 잊었다고 요청했습니다. 눌러서 처리해 주세요.`, 'admin', 'pw-' + d.id);
+    await d.ref.update({ notified: true }); log('비밀번호 찾기', x.name, c + '대'); }
+}
 /* 8) 첫 화면 숫자 다시 세기 (함께하는 시민) */
 async function statsJob(){
   const n = (await db.collection('supporters').count().get()).data().count;
   await db.doc('stats/main').set({ supporters: n, countedAt: new Date().toISOString() }, { merge: true });
+  /* 리더 33인 모집 현황 (가입 링크가 리더/일반 신청서 중 무엇을 열지 정함) */
+  const ms = await db.collection('members').where('status', '==', 'approved').get(); const r = await roles();
+  const gr = x => ['leader', 'normal', 'chair', 'sec'].includes(x.grade) ? x.grade : (x.area ? 'leader' : 'normal');
+  const ld = ms.docs.filter(d => gr(d.data()) === 'leader').map(d => d.id);
+  const lr = [...new Set(ms.docs.filter(d => gr(d.data()) !== 'normal').map(d => d.id).concat(r.owner ? [r.owner] : [], r.admins, r.reviewers))].sort();
+  await db.doc('public/stats').set({ leaders: ld.length, lr, at: new Date().toISOString() });
 }
 
 /* 4) 페이스북 */
@@ -210,7 +224,7 @@ async function resets(){
 }
 
 (async () => {
-  for (const [name, fn] of [['공지', notices], ['유세', rallies], ['가입', applicants], ['페이스북', facebook], ['비밀번호', resets], ['승인 알림', welcomes], ['추천 의견', referralsJob], ['숫자 세기', statsJob]]){
+  for (const [name, fn] of [['공지', notices], ['유세', rallies], ['가입', applicants], ['페이스북', facebook], ['비밀번호', resets], ['승인 알림', welcomes], ['추천 의견', referralsJob], ['숫자 세기', statsJob], ['비밀번호 찾기', pwHelpJob]]){
     try { await fn(); } catch (e){ console.error(name + ' 처리 중 오류:', e.message); process.exitCode = 1; }
   }
 })();
