@@ -95,20 +95,20 @@ async function rallies(){
     if (!sent.created){
       if (r.atMs > NOW){
         const [y, m, dd] = r.date.split('-').map(Number); const w = WD[new Date(Date.UTC(y, m - 1, dd)).getUTCDay()];
-        const c = await pushTo(await everyone(), '[유세 동행 모집] ' + r.place, `${m}.${dd}(${w}) ${r.start} ${r.type || ''} · 필요 ${r.need || 0}명 — 동행 신청해 주세요`, 'rally', 'rally-' + d.id);
-        log('유세 모집', r.place, c + '대');
+        const c = await pushTo(await everyone(), '[활동 동행 모집] ' + r.place, `${m}.${dd}(${w}) ${r.start} ${r.type || ''} · 필요 ${r.need || 0}명 — 동행 신청해 주세요`, 'rally', 'rally-' + d.id);
+        log('활동 모집', r.place, c + '대');
       }
       upd['sent.created'] = true;
     }
     const crew = r.crew || [];
     const st = [
-      { k: 'eve', t: kst(r.date, '20:00') - 86400000, title: '[내일 유세 동행] ' + r.place, body: `${r.meetAt || r.start} 집결 · ${r.meetPlace || r.place}` + (r.items ? ` · 준비물: ${r.items}` : '') },
+      { k: 'eve', t: kst(r.date, '20:00') - 86400000, title: '[내일 활동 동행] ' + r.place, body: `${r.meetAt || r.start} 집결 · ${r.meetPlace || r.place}` + (r.items ? ` · 준비물: ${r.items}` : '') },
       { k: 'h1', t: meet - 3600000, title: '[1시간 뒤 집결] ' + r.place, body: `${r.meetAt || r.start} · ${r.meetPlace || r.place}` },
     ].filter(x => x.t < meet);
     const due = st.filter(x => x.t <= NOW && !sent[x.k] && NOW < meet);
     if (due.length){
       const x = due[due.length - 1];
-      if (crew.length){ const c = await pushTo(crew, x.title, x.body, 'rally', 'rally-' + d.id); log('유세 동행', r.place, x.k, c + '대'); }
+      if (crew.length){ const c = await pushTo(crew, x.title, x.body, 'rally', 'rally-' + d.id); log('활동 동행', r.place, x.k, c + '대'); }
       due.forEach(y => { upd['sent.' + y.k] = true; });
     }
     if (Object.keys(upd).length) await d.ref.update(upd);
