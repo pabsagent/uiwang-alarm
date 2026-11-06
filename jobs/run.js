@@ -216,6 +216,8 @@ async function resets(){
   for (const d of snap.docs){
     const q = d.data();
     if (!admins.has(q.by) || !q.uid){ await d.ref.update({ done: true, error: '관리자 요청이 아닙니다' }); continue; }
+    // 관리자 계정(최고·공동 관리자·검토자)의 비밀번호는 최고 관리자만 초기화할 수 있음 (공동 관리자가 최고 관리자 계정을 가져가지 못하게)
+    if (admins.has(q.uid) && q.by !== r.owner){ await d.ref.update({ done: true, error: '관리자 계정의 비밀번호는 최고 관리자만 초기화할 수 있습니다' }); log('비밀번호 초기화 거절(관리자 계정)', q.name); continue; }
     const chars = 'abcdefghjkmnpqrstuvwxyz23456789';
     let temp = ''; for (let i = 0; i < 8; i++) temp += chars[crypto.randomInt(chars.length)];
     try { await admin.auth().updateUser(q.uid, { password: temp }); await d.ref.update({ done: true, temp, doneAt: new Date().toISOString() }); log('비밀번호 초기화', q.name); }
