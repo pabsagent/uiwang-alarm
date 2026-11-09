@@ -1,3 +1,4 @@
+# 의왕의힘 알림 도우미 — 5분마다 Firebase를 확인해 휴대폰 알림을 보냅니다.
 name: 알림 도우미
 on:
   schedule:
@@ -13,10 +14,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      # Node.js 20 지원 종료(2025-09) → Node 24로 도는 v5 액션과 Node 24 사용
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
-          node-version: 20
+          node-version: 24
       - name: 준비
         working-directory: jobs
         run: npm install --omit=dev --no-audit --no-fund
@@ -25,6 +27,7 @@ jobs:
         env:
           FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
         run: node run.js
+      # 공개 저장소는 60일 동안 변경이 없으면 예약 실행이 멈춥니다. 한 달에 한 번 기록을 남겨 계속 돌게 합니다.
       - name: 한 달에 한 번 기록 남기기
         if: github.event_name == 'schedule'
         run: |
