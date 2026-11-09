@@ -1,4 +1,4 @@
-/* 의왕의힘33 알림 도우미 — GitHub가 5분마다 실행합니다.
+/* 의왕의힘 알림 도우미 — GitHub가 5분마다 실행합니다.
    1) 공지: 등록 직후 · 하루 전 오전 9시 · 당일 오전 9시 · 1시간 전 → 승인 회원 전체
    2) 유세: 등록 직후 동행 모집 → 회원 전체 / 전날 오후 8시 · 집결 1시간 전 → 동행 신청자
    3) 가입 신청 → 최고 관리자와 검토자에게만
@@ -7,6 +7,7 @@
    6) 가입 승인 → 승인된 본인에게 ‘승인 완료’ 알림 (누르면 사이트가 열리고 홈 화면 설치 안내가 나옴) */
 const admin = require('firebase-admin');
 const crypto = require('crypto');
+const { kstDay, needsRecount, leaderStats } = require('./lib');
 
 if (!process.env.FIREBASE_SERVICE_ACCOUNT) { console.error('FIREBASE_SERVICE_ACCOUNT 비밀 값이 없습니다. 안내서 9단계를 확인하세요.'); process.exit(1); }
 admin.initializeApp({ credential: admin.credential.cert(JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT)) });
@@ -138,7 +139,7 @@ async function welcomes(){
     const m = d.data();
     if (m.status === 'approved'){
       const where = m.area ? ` · ${m.area}${m.lead ? ' 대표' : ''}로 배치되었습니다` : '';
-      const c = await pushTo([d.id], '의왕의힘33 회원이 되셨습니다', `${m.name || ''}님 환영합니다${where}. 눌러서 앱을 홈 화면에 설치해 주세요.`, 'roadmap', 'welcome-' + d.id);
+      const c = await pushTo([d.id], '의왕의힘 회원이 되셨습니다', `${m.name || ''}님 환영합니다${where}. 눌러서 앱을 홈 화면에 설치해 주세요.`, 'roadmap', 'welcome-' + d.id);
       log('가입 승인 알림', m.name, c + '대');
     }
     await d.ref.update({ welcomed: true });
@@ -165,16 +166,24 @@ async function pwHelpJob(){
     const c = await pushTo([r.owner, ...r.admins, ...r.reviewers], '비밀번호 찾기 요청', `${x.name || '회원'}님(${x.loginId || ''})이 비밀번호를 잊었다고 요청했습니다. 눌러서 처리해 주세요.`, 'admin', 'pw-' + d.id);
     await d.ref.update({ notified: true }); log('비밀번호 찾기', x.name, c + '대'); }
 }
-/* 8) 첫 화면 숫자 다시 세기 (함께하는 시민) */
+/* 8) 첫 화면 숫자 다시 세기 (함께하는 시민) — count()는 1,000명당 읽기 1건이라 매번 함 */
 async function statsJob(){
   const n = (await db.collection('supporters').count().get()).data().count;
+  const st = await db.doc('stats/main').get();
   await db.doc('stats/main').set({ supporters: n, countedAt: new Date().toISOString() }, { merge: true });
-  /* 리더 33인 모집 현황 (가입 링크가 리더/일반 신청서 중 무엇을 열지 정함) */
-  const ms = await db.collection('members').where('status', '==', 'approved').get(); const r = await roles();
-  const gr = x => ['leader', 'normal', 'chair', 'sec'].includes(x.grade) ? x.grade : (x.area ? 'leader' : 'normal');
-  const ld = ms.docs.filter(d => gr(d.data()) === 'leader').map(d => d.id);
-  const lr = [...new Set(ms.docs.filter(d => gr(d.data()) !== 'normal').map(d => d.id).concat(r.owner ? [r.owner] : [], r.admins, r.reviewers))].sort();
-  await db.doc('public/stats').set({ leaders: ld.length, lr, at: new Date().toISOString() });
+  /* 리더 33인 모집 현황 (가입 링크가 리더/일반 신청서 중 무엇을 열지 정함)
+     회원 전체를 5분마다 읽으면 무료 한도가 바닥나므로, 한국 날짜로 하루 1번 리더 후보만 읽음.
+     평소에는 관리자 화면이 승인·배치할 때 public/stats를 바로 고침 */
+  if (!needsRecount(st.exists ? st.data().countedDay : undefined, NOW)) return;
+  const [byGrade, byArea] = await Promise.all([
+    db.collection('members').where('grade', 'in', ['leader', 'chair', 'sec']).get(),
+    db.collection('members').where('area', '!=', '').get(),
+  ]);
+  const docs = [...new Map([...byGrade.docs, ...byArea.docs].map(d => [d.id, { id: d.id, data: d.data() }])).values()];
+  const { leaders, lr } = leaderStats(docs, await roles());
+  await db.doc('public/stats').set({ leaders, lr, at: new Date().toISOString() });
+  await db.doc('stats/main').set({ countedDay: kstDay(NOW) }, { merge: true });
+  log('리더 숫자 다시 셈', leaders + '명');
 }
 
 /* 4) 페이스북 */
