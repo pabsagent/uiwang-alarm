@@ -1,5 +1,5 @@
 /* 의왕의힘 알림 도우미 — GitHub가 5분마다 실행합니다.
-   1) 공지: 등록 직후 · 하루 전 오전 9시 · 당일 오전 9시 · 1시간 전 → 승인 회원 전체
+   1) 공지·일정(board): 새 글 · 하루 전 오전 9시 · 당일 오전 9시 · 1시간 전 · 회의록 → 승인 회원 전체
    2) 유세: 등록 직후 동행 모집 → 회원 전체 / 전날 오후 8시 · 집결 1시간 전 → 동행 신청자
    3) 가입 신청 → 최고 관리자와 검토자에게만
    4) 위원장 페이스북 새 글 → 회원 전체 (페이스북 ‘페이지’ 연결 시 30분마다 새 글 자동 가져오기)
@@ -7,7 +7,7 @@
    6) 가입 승인 → 승인된 본인에게 ‘승인 완료’ 알림 (누르면 사이트가 열리고 홈 화면 설치 안내가 나옴) */
 const admin = require('firebase-admin');
 const crypto = require('crypto');
-const { kstDay, needsRecount, leaderStats, whenText, bundlePush } = require('./lib');
+const { kstDay, needsRecount, leaderStats, whenText, bundlePush, dueStage } = require('./lib');
 
 if (!process.env.FIREBASE_SERVICE_ACCOUNT) { console.error('FIREBASE_SERVICE_ACCOUNT 비밀 값이 없습니다. 안내서 9단계를 확인하세요.'); process.exit(1); }
 admin.initializeApp({ credential: admin.credential.cert(JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT)) });
@@ -55,38 +55,30 @@ async function pushTo(uids, title, body, view, tag){
   }
   return sent;
 }
-/* 1) 공지 — 같은 때 보낼 알림은 단계(새 공지·내일·오늘·1시간 뒤)별로 1개로 묶음.
-   제목에는 오늘과 가장 가까운 일정, 나머지는 ‘외 N건’ (여러 개를 한꺼번에 올려도 휴대폰은 한 번만 울림) */
-const NOTICE_LABEL = { new: '새 공지', d1: '내일', d0: '오늘', h1: '1시간 뒤' };
-async function notices(){
-  const snap = await db.collection('notices').where('atMs', '>', NOW).get();
-  const groups = { new: [], d1: [], d0: [], h1: [] }, updates = [];
-  for (const d of snap.docs){
-    const n = d.data(); const sent = n.sent || {};
-    const atMs = n.atMs || kst(n.date, n.time);
-    const created = Date.parse(n.createdAt || '') || NOW;
-    const stages = [
-      { k: 'new', t: created, title: '[새 공지] ' + n.title },
-      { k: 'd1', t: kst(n.date, '09:00') - 86400000, title: '[내일] ' + n.title },
-      { k: 'd0', t: kst(n.date, '09:00'), title: '[오늘] ' + n.title },
-      { k: 'h1', t: atMs - 3600000, title: '[1시간 뒤] ' + n.title },
-    ].filter(s => s.t < atMs);
-    const upd = {};
-    stages.filter(s => s.k !== 'new' && s.t < created && !sent[s.k]).forEach(s => { upd['sent.' + s.k] = true; });   // 등록 전에 이미 지난 단계는 건너뜀
-    const due = stages.filter(s => s.t <= NOW && !sent[s.k] && !upd['sent.' + s.k]).sort((a, b) => a.t - b.t);
-    if (due.length){
-      const s = due[due.length - 1];   // 밀린 단계가 여럿이면 가장 최근 단계 하나만
-      groups[s.k].push({ title: n.title, sub: whenText(n, atMs), at: atMs });
-      due.forEach(x => { upd['sent.' + x.k] = true; });
-    }
-    if (Object.keys(upd).length) updates.push([d.ref, upd]);
-  }
-  for (const k of Object.keys(groups)){
-    const p = bundlePush(NOTICE_LABEL[k], groups[k]); if (!p) continue;
-    const c = await pushTo(await everyone(), p.title, p.body, 'notices', 'notice-' + k + '-' + NOW);
-    log('공지', k, groups[k].length + '건', c + '대');
-  }
-  for (const [ref, upd] of updates) await ref.update(upd);   // 보낸 뒤에 표시 (보내다 실패하면 다음 실행에 다시)
+/* 1) 공지·일정(board) — 같은 때 보낼 알림은 1개로 묶음 (제목은 오늘과 가장 가까운 일정, 나머지는 ‘외 N건’)
+   ① 새 글(pendingNew) ② 미리 알림(하루 전 9시·당일 9시·1시간 전, dueStage) ③ 회의록(pendingMinutes)
+   보낸 뒤에 표시함 (보내다 실패하면 다음 실행에 다시) */
+const NOTICE_LABEL = { d1: '내일', d0: '오늘', h1: '1시간 뒤' };
+async function boardJob(){
+  const send = async (label, items, tag) => { const p = bundlePush(label, items); if (!p) return;
+    const c = await pushTo(await everyone(), p.title, p.body, 'board', 'board-' + tag + '-' + NOW); log('공지·일정', label, items.length + '건', c + '대'); };
+  const item = x => ({ title: x.title || '', sub: x.atMs ? whenText(x, x.atMs) : '날짜 없는 공지', at: x.atMs || Number.MAX_SAFE_INTEGER });
+
+  const fresh = await db.collection('board').where('pendingNew', '==', true).get();
+  await send('새 공지', fresh.docs.map(d => item(d.data())), 'new');
+  for (const d of fresh.docs) await d.ref.update({ pendingNew: false });
+
+  const soon = await db.collection('board').where('atMs', '>', NOW).get();
+  const groups = { d1: [], d0: [], h1: [] }, updates = [];
+  for (const d of soon.docs){ const x = d.data(), r = dueStage(x, NOW);
+    if (r.send) groups[r.send].push(item(x));
+    if (r.mark.length) updates.push([d.ref, Object.fromEntries(r.mark.map(k => ['sent.' + k, true]))]); }
+  for (const k of Object.keys(groups)) await send(NOTICE_LABEL[k], groups[k], k);
+  for (const [ref, upd] of updates) await ref.update(upd);
+
+  const mins = await db.collection('board').where('pendingMinutes', '==', true).get();
+  await send('회의록', mins.docs.map(d => item(d.data())), 'min');
+  for (const d of mins.docs) await d.ref.update({ pendingMinutes: false });
 }
 
 /* 2) 유세 */
@@ -242,7 +234,7 @@ async function resets(){
 }
 
 (async () => {
-  for (const [name, fn] of [['공지', notices], ['유세', rallies], ['가입', applicants], ['페이스북', facebook], ['비밀번호', resets], ['승인 알림', welcomes], ['추천 의견', referralsJob], ['숫자 세기', statsJob], ['비밀번호 찾기', pwHelpJob]]){
+  for (const [name, fn] of [['공지·일정', boardJob], ['유세', rallies], ['가입', applicants], ['페이스북', facebook], ['비밀번호', resets], ['승인 알림', welcomes], ['추천 의견', referralsJob], ['숫자 세기', statsJob], ['비밀번호 찾기', pwHelpJob]]){
     try { await fn(); } catch (e){ console.error(name + ' 처리 중 오류:', e.message); process.exitCode = 1; }
   }
 })();

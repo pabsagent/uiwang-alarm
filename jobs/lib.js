@@ -37,4 +37,16 @@ function bundlePush(label, items){
   return { title: `[${label} ${s.length}건] ${first.title} 외 ${rest.length}건`, body: `${first.sub}\n그 밖에: ${names}` };
 }
 
-module.exports = { kstDay, needsRecount, gradeOf, leaderStats, whenText, bundlePush };
+/* 공지·일정 글의 미리 알림 단계: 하루 전 09:00(d1) · 당일 09:00(d0) · 1시간 전(h1, 시간이 있을 때만).
+   send = 지금 보낼 단계(밀린 것이 여럿이면 가장 늦은 것 하나), mark = 보냈다고 표시할 단계(등록 전에 이미 지난 단계 포함) */
+function dueStage(p, now){
+  const none = { send: null, mark: [] };
+  if (!p.notify || !p.atMs || !p.date || now >= p.atMs) return none;
+  const nine = Date.parse(p.date + 'T09:00:00+09:00'), created = Date.parse(p.createdAt || '') || 0, sent = p.sent || {};
+  const st = [{ k: 'd1', t: nine - 86400000 }, { k: 'd0', t: nine }].concat(p.time ? [{ k: 'h1', t: p.atMs - 3600000 }] : [])
+    .filter(s => s.t < p.atMs && !sent[s.k] && s.t <= now);
+  const skip = st.filter(s => s.t < created), due = st.filter(s => s.t >= created).sort((a, b) => a.t - b.t);
+  return { send: due.length ? due[due.length - 1].k : null, mark: skip.concat(due).map(s => s.k) };
+}
+
+module.exports = { kstDay, needsRecount, gradeOf, leaderStats, whenText, bundlePush, dueStage };
