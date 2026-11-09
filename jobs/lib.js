@@ -19,4 +19,22 @@ function leaderStats(docs, roles){
   return { leaders, lr };
 }
 
-module.exports = { kstDay, needsRecount, gradeOf, leaderStats };
+/* 알림 본문의 날짜: '11.20(금) 오후 7:00 · 장소' (한국 시간) */
+const WD = ['일','월','화','수','목','금','토'];
+function whenText(n, atMs){
+  const at = new Date(atMs + 9 * 3600000);
+  const h = at.getUTCHours(), m = String(at.getUTCMinutes()).padStart(2, '0');
+  return `${at.getUTCMonth() + 1}.${at.getUTCDate()}(${WD[at.getUTCDay()]}) ${h < 12 ? '오전' : '오후'} ${(h % 12) || 12}:${m}` + (n.place ? ` · ${n.place}` : '');
+}
+
+/* 같은 때 보낼 알림 여러 개를 휴대폰 알림 1개로 묶음.
+   items = [{title, sub, at}] — 가장 가까운(at이 가장 작은) 일정을 제목에, 나머지는 ‘외 N건’과 본문 목록(최대 5개)으로 */
+function bundlePush(label, items){
+  if (!items.length) return null;
+  const s = items.slice().sort((a, b) => a.at - b.at), first = s[0], rest = s.slice(1);
+  if (!rest.length) return { title: `[${label}] ${first.title}`, body: first.sub };
+  const names = rest.slice(0, 5).map(x => x.title).join(', ') + (rest.length > 5 ? ` 외 ${rest.length - 5}건` : '');
+  return { title: `[${label} ${s.length}건] ${first.title} 외 ${rest.length}건`, body: `${first.sub}\n그 밖에: ${names}` };
+}
+
+module.exports = { kstDay, needsRecount, gradeOf, leaderStats, whenText, bundlePush };

@@ -7,7 +7,7 @@
    6) 가입 승인 → 승인된 본인에게 ‘승인 완료’ 알림 (누르면 사이트가 열리고 홈 화면 설치 안내가 나옴) */
 const admin = require('firebase-admin');
 const crypto = require('crypto');
-const { kstDay, needsRecount, leaderStats } = require('./lib');
+const { kstDay, needsRecount, leaderStats, whenText, bundlePush } = require('./lib');
 
 if (!process.env.FIREBASE_SERVICE_ACCOUNT) { console.error('FIREBASE_SERVICE_ACCOUNT 비밀 값이 없습니다. 안내서 9단계를 확인하세요.'); process.exit(1); }
 admin.initializeApp({ credential: admin.credential.cert(JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT)) });
@@ -55,15 +55,12 @@ async function pushTo(uids, title, body, view, tag){
   }
   return sent;
 }
-function whenText(n, atMs){
-  const at = new Date(atMs + 9 * 3600000);
-  const h = at.getUTCHours(), m = String(at.getUTCMinutes()).padStart(2, '0');
-  return `${at.getUTCMonth() + 1}.${at.getUTCDate()}(${WD[at.getUTCDay()]}) ${h < 12 ? '오전' : '오후'} ${(h % 12) || 12}:${m}` + (n.place ? ` · ${n.place}` : '');
-}
-
-/* 1) 공지 */
+/* 1) 공지 — 같은 때 보낼 알림은 단계(새 공지·내일·오늘·1시간 뒤)별로 1개로 묶음.
+   제목에는 오늘과 가장 가까운 일정, 나머지는 ‘외 N건’ (여러 개를 한꺼번에 올려도 휴대폰은 한 번만 울림) */
+const NOTICE_LABEL = { new: '새 공지', d1: '내일', d0: '오늘', h1: '1시간 뒤' };
 async function notices(){
   const snap = await db.collection('notices').where('atMs', '>', NOW).get();
+  const groups = { new: [], d1: [], d0: [], h1: [] }, updates = [];
   for (const d of snap.docs){
     const n = d.data(); const sent = n.sent || {};
     const atMs = n.atMs || kst(n.date, n.time);
@@ -78,18 +75,26 @@ async function notices(){
     stages.filter(s => s.k !== 'new' && s.t < created && !sent[s.k]).forEach(s => { upd['sent.' + s.k] = true; });   // 등록 전에 이미 지난 단계는 건너뜀
     const due = stages.filter(s => s.t <= NOW && !sent[s.k] && !upd['sent.' + s.k]).sort((a, b) => a.t - b.t);
     if (due.length){
-      const s = due[due.length - 1];
-      const c = await pushTo(await everyone(), s.title, whenText(n, atMs), 'notices', 'notice-' + d.id);
+      const s = due[due.length - 1];   // 밀린 단계가 여럿이면 가장 최근 단계 하나만
+      groups[s.k].push({ title: n.title, sub: whenText(n, atMs), at: atMs });
       due.forEach(x => { upd['sent.' + x.k] = true; });
-      log('공지', n.title, s.k, c + '대');
     }
-    if (Object.keys(upd).length) await d.ref.update(upd);
+    if (Object.keys(upd).length) updates.push([d.ref, upd]);
   }
+  for (const k of Object.keys(groups)){
+    const p = bundlePush(NOTICE_LABEL[k], groups[k]); if (!p) continue;
+    const c = await pushTo(await everyone(), p.title, p.body, 'notices', 'notice-' + k + '-' + NOW);
+    log('공지', k, groups[k].length + '건', c + '대');
+  }
+  for (const [ref, upd] of updates) await ref.update(upd);   // 보낸 뒤에 표시 (보내다 실패하면 다음 실행에 다시)
 }
 
 /* 2) 유세 */
+/* 동행 모집 알림은 여러 개를 한꺼번에 올려도 1개로 묶음 (가장 가까운 활동이 제목).
+   동행 신청자에게 가는 ‘전날 저녁·1시간 뒤 집결’ 알림은 사람마다 중요한 알림이라 지금처럼 활동마다 따로 */
 async function rallies(){
   const snap = await db.collection('rallies').where('atMs', '>', NOW - 6 * 3600000).get();
+  const recruit = [], created = [];
   for (const d of snap.docs){
     const r = d.data(); const sent = r.sent || {}; const upd = {};
     if (r.law){ if (!sent.created) await d.ref.update({ 'sent.created': true }); continue; }   // 법정 일정은 동행 모집 알림을 보내지 않음
@@ -97,10 +102,9 @@ async function rallies(){
     if (!sent.created){
       if (r.atMs > NOW){
         const [y, m, dd] = r.date.split('-').map(Number); const w = WD[new Date(Date.UTC(y, m - 1, dd)).getUTCDay()];
-        const c = await pushTo(await everyone(), '[활동 동행 모집] ' + r.place, `${m}.${dd}(${w}) ${r.start} ${r.type || ''} · 필요 ${r.need || 0}명 — 동행 신청해 주세요`, 'rally', 'rally-' + d.id);
-        log('활동 모집', r.place, c + '대');
+        recruit.push({ title: r.place, sub: `${m}.${dd}(${w}) ${r.start} ${r.type || ''} · 필요 ${r.need || 0}명 — 동행 신청해 주세요`, at: r.atMs });
       }
-      upd['sent.created'] = true;
+      created.push(d.ref);   // 모집 알림을 보낸 뒤 표시
     }
     const crew = r.crew || [];
     const st = [
@@ -115,6 +119,9 @@ async function rallies(){
     }
     if (Object.keys(upd).length) await d.ref.update(upd);
   }
+  const p = bundlePush('활동 동행 모집', recruit);
+  if (p){ const c = await pushTo(await everyone(), p.title, p.body, 'rally', 'rally-new-' + NOW); log('활동 모집', recruit.length + '건', c + '대'); }
+  for (const ref of created) await ref.update({ 'sent.created': true });
 }
 
 /* 3) 가입 신청 */
