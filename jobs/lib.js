@@ -66,4 +66,23 @@ function supSplit(id, d){
   return { key: id, sup, link, keyDoc };
 }
 
-module.exports = { kstDay, needsRecount, gradeOf, leaderStats, whenText, bundlePush, dueStage, supSplit };
+/* ===== 7A: FCM 주제 'all' (회원 전체 알림을 한 번에) =====
+   주제에 넣을 사람: 승인 회원 + 관리자(최고·공동·검토자). 삭제·불가는 뺌. 그 밖(가입 대기 등)은 승인될 때까지 기다림 */
+function topicTarget(member, uid, roles){
+  const r = roles || {};
+  if (uid && (r.owner === uid || (r.admins || []).includes(uid) || (r.reviewers || []).includes(uid))) return 'in';
+  const st = member && member.status;
+  if (st === 'approved') return 'in';
+  if (st === 'deleted' || st === 'rejected') return 'out';
+  return 'wait';
+}
+/* 알림 모양 (pushTo와 같음, 받는 대상만 빼고) */
+function pushPayload(title, body, view, tag){
+  return {
+    notification: { title, body },
+    data: { view: view || 'notices', tag: tag || '' },
+    webpush: { fcmOptions: { link: '/#' + (view || 'notices') }, notification: { icon: '/icons/icon-192.png', tag: tag || undefined } },
+  };
+}
+
+module.exports = { topicTarget, pushPayload, kstDay, needsRecount, gradeOf, leaderStats, whenText, bundlePush, dueStage, supSplit };

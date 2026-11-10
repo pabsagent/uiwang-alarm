@@ -1,4 +1,5 @@
 /* 의왕의힘 알림 도우미 — GitHub가 5분마다 실행합니다.
+   0) 회원 전체 알림은 FCM 주제 'all'로 한 번에 보냄 (승인 회원·관리자 기기를 주제에 가입시킴)
    1) 공지·일정(board): 새 글 · 하루 전 오전 9시 · 당일 오전 9시 · 1시간 전 · 회의록 → 승인 회원 전체
    2) 유세: 등록 직후 동행 모집 → 회원 전체 / 전날 오후 8시 · 집결 1시간 전 → 동행 신청자
    3) 가입 신청 → 최고 관리자와 검토자에게만
@@ -7,7 +8,7 @@
    6) 가입 승인 → 승인된 본인에게 ‘승인 완료’ 알림 (누르면 사이트가 열리고 홈 화면 설치 안내가 나옴) */
 const admin = require('firebase-admin');
 const crypto = require('crypto');
-const { kstDay, needsRecount, leaderStats, whenText, bundlePush, dueStage, supSplit } = require('./lib');
+const { kstDay, needsRecount, leaderStats, whenText, bundlePush, dueStage, supSplit, topicTarget, pushPayload } = require('./lib');
 
 if (!process.env.FIREBASE_SERVICE_ACCOUNT) { console.error('FIREBASE_SERVICE_ACCOUNT 비밀 값이 없습니다. 안내서 9단계를 확인하세요.'); process.exit(1); }
 admin.initializeApp({ credential: admin.credential.cert(JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT)) });
@@ -18,14 +19,6 @@ const NOW = Date.now();
 const log = (...a) => console.log(new Date().toISOString(), ...a);
 
 async function roles(){ const s = await db.doc('roles/main').get(); const d = s.exists ? s.data() : {}; return { owner: d.owner || '', admins: d.admins || [], reviewers: d.reviewers || [] }; }
-let _all = null;
-async function everyone(){
-  if (_all) return _all;
-  const r = await roles();
-  const snap = await db.collection('members').where('status', '==', 'approved').get();
-  _all = [...new Set([...snap.docs.map(d => d.id), r.owner, ...r.admins, ...r.reviewers].filter(Boolean))];
-  return _all;
-}
 
 /* 받는 사람들의 기기로 보냅니다. 끊긴 기기는 정리합니다. */
 async function pushTo(uids, title, body, view, tag){
@@ -40,12 +33,7 @@ async function pushTo(uids, title, body, view, tag){
   let sent = 0;
   for (let i = 0; i < tokens.length; i += 500){
     const batch = tokens.slice(i, i + 500);
-    const res = await admin.messaging().sendEachForMulticast({
-      tokens: batch,
-      notification: { title, body },
-      data: { view: view || 'notices', tag: tag || '' },
-      webpush: { fcmOptions: { link: '/#' + (view || 'notices') }, notification: { icon: '/icons/icon-192.png', tag: tag || undefined } },
-    });
+    const res = await admin.messaging().sendEachForMulticast(Object.assign({ tokens: batch }, pushPayload(title, body, view, tag)));
     sent += res.successCount;
     for (let k = 0; k < res.responses.length; k++){
       const c = res.responses[k].error && res.responses[k].error.code;
@@ -55,13 +43,99 @@ async function pushTo(uids, title, body, view, tag){
   }
   return sent;
 }
+/* 0) FCM 주제 'all': 회원 전체 알림을 한 번에 보냄 (회원·기기 수와 상관없이 읽기 거의 0)
+   - 사이트가 기기 토큰을 저장할 때 tokens/{uid}.topic = false → 여기서 승인 회원·관리자면 주제에 가입시키고 topic = true
+   - 가입 대기는 'wait'(승인 알림 때 다시 false로 돌려 가입), 삭제·거절은 'out'
+   - 처음 한 번은 config/main.topicBackfilled가 없으므로 기존 토큰 전체를 가입시킴 (이 실행의 알림부터 빠지는 사람 없게 맨 먼저 실행) */
+const FieldPath = admin.firestore.FieldPath;
+async function memberMap(uids){
+  const out = {};
+  for (let i = 0; i < uids.length; i += 30){
+    const s = await db.collection('members').where(FieldPath.documentId(), 'in', uids.slice(i, i + 30)).get();
+    s.forEach(d => { out[d.id] = d.data(); });
+  }
+  return out;
+}
+/* 토큰 문서들을 보고: 승인 회원·관리자면 주제 가입, 아니면 주제에서 뺌(전에 가입돼 있었을 수 있으므로 늘 뺌)
+   표시(topic)는 가입·탈퇴가 끝난 뒤, 그사이 사이트가 새 토큰을 더했으면(문서가 바뀜) 배치가 실패해 다음 실행에 다시 함 */
+async function subscribeDocs(docs, r){
+  const mem = await memberMap(docs.map(d => d.id)), join = [], leave = [], b = db.batch();
+  for (const d of docs){
+    const t = topicTarget(mem[d.id] || null, d.id, r), toks = d.data().tokens || [];
+    (t === 'in' ? join : leave).push(...toks);
+    b.update(d.ref, { topic: t === 'in' ? true : t }, { lastUpdateTime: d.updateTime });
+  }
+  let n = 0;
+  for (let i = 0; i < join.length; i += 1000) n += (await admin.messaging().subscribeToTopic(join.slice(i, i + 1000), 'all')).successCount;
+  for (let i = 0; i < leave.length; i += 1000) await admin.messaging().unsubscribeFromTopic(leave.slice(i, i + 1000), 'all');
+  await b.commit();
+  return n;
+}
+/* 기존 기기 전체를 다 가입시키기 전에는 주제로 보내지 않음 (sendAll이 멈추고, 각 알림은 표시를 남기지 않아 다음 실행에 다시 감) */
+let topicReady = false;
+async function topicSync(){
+  const r = await roles(), cfgRef = db.doc('config/main'), cfg = await cfgRef.get(), c = cfg.exists ? cfg.data() : {};
+  if (!c.topicBackfilled){
+    /* 처음 한 번: 기존 토큰 전체. 한 실행에 최대 40쪽(12,000개), 어디까지 했는지 topicBackfillAfter에 남겨 이어서 함 */
+    let after = c.topicBackfillAfter || '', n = 0;
+    for (let page = 0; page < 40; page++){
+      let q = db.collection('tokens').orderBy(FieldPath.documentId()).limit(300); if (after) q = q.startAfter(after);
+      const s = await q.get();
+      if (s.empty){ await cfgRef.set({ topicBackfilled: true }, { merge: true }); topicReady = true; log('주제 가입(처음, 기존 기기 전체) 끝', n + '대'); return; }
+      const todo = s.docs.filter(d => d.data().topic !== true);
+      if (todo.length) n += await subscribeDocs(todo, r);
+      after = s.docs[s.docs.length - 1].id;
+      await cfgRef.set({ topicBackfillAfter: after }, { merge: true });
+      if (s.size < 300){ await cfgRef.set({ topicBackfilled: true }, { merge: true }); topicReady = true; log('주제 가입(처음, 기존 기기 전체) 끝', n + '대'); return; }
+    }
+    log('주제 가입(처음) 진행 중', n + '대 · 다음 실행에 이어서');
+    return;
+  }
+  topicReady = true;
+  const s = await db.collection('tokens').where('topic', '==', false).limit(300).get();
+  if (s.empty) return;
+  const n = await subscribeDocs(s.docs, r);
+  if (n) log('주제 가입', n + '대');
+}
+/* 하루 1번: ① 삭제·거절·다시 심사(대기)가 된 회원의 기기를 주제에서 뺌 (관리자는 그대로)
+   ② 빠져 있던 기기('out'·'wait') 중 지금 승인 회원·관리자인 사람(복구 등)은 다시 가입 대상으로(topic=false) */
+async function topicOut(){
+  const st = await db.doc('stats/main').get();
+  if (!needsRecount(st.exists ? st.data().topicOutDay : undefined, NOW)) return;
+  const r = await roles(), gone = await db.collection('members').where('status', 'in', ['deleted', 'rejected', 'pending']).get();
+  const mem = {}; gone.forEach(d => { mem[d.id] = d.data(); });
+  const ids = Object.keys(mem).filter(id => topicTarget(mem[id], id, r) !== 'in');
+  let n = 0;
+  for (let i = 0; i < ids.length; i += 30){
+    const s = await db.collection('tokens').where(FieldPath.documentId(), 'in', ids.slice(i, i + 30)).get();
+    for (const d of s.docs){
+      if (d.data().topic !== true) continue;
+      const toks = d.data().tokens || [];
+      if (toks.length) n += (await admin.messaging().unsubscribeFromTopic(toks, 'all')).successCount;
+      await d.ref.update({ topic: topicTarget(mem[d.id], d.id, r) });
+    }
+  }
+  const off = await db.collection('tokens').where('topic', 'in', ['out', 'wait']).get();
+  const back = await memberMap(off.docs.map(d => d.id));
+  let m = 0;
+  for (const d of off.docs) if (topicTarget(back[d.id] || null, d.id, r) === 'in'){ await d.ref.update({ topic: false }); m++; }
+  await db.doc('stats/main').set({ topicOutDay: kstDay(NOW) }, { merge: true });
+  if (n || m) log('주제 정리', '탈퇴 ' + n + '대', '다시 가입 대상 ' + m + '명');
+}
+/* 회원 전체 알림: 주제로 한 번 */
+async function sendAll(title, body, view, tag){
+  if (!topicReady) throw new Error('기존 기기를 아직 ‘전체’ 주제에 다 넣지 못해 보내지 않음 (다음 실행에 다시)');
+  await admin.messaging().send(Object.assign({ topic: 'all' }, pushPayload(title, body, view, tag)));
+  return 1;
+}
+
 /* 1) 공지·일정(board) — 같은 때 보낼 알림은 1개로 묶음 (제목은 오늘과 가장 가까운 일정, 나머지는 ‘외 N건’)
    ① 새 글(pendingNew) ② 미리 알림(하루 전 9시·당일 9시·1시간 전, dueStage) ③ 회의록(pendingMinutes)
    보낸 뒤에 표시함 (보내다 실패하면 다음 실행에 다시) */
 const NOTICE_LABEL = { d1: '내일', d0: '오늘', h1: '1시간 뒤' };
 async function boardJob(){
   const send = async (label, items, tag) => { const p = bundlePush(label, items); if (!p) return;
-    const c = await pushTo(await everyone(), p.title, p.body, 'board', 'board-' + tag + '-' + NOW); log('공지·일정', label, items.length + '건', c + '대'); };
+    await sendAll(p.title, p.body, 'board', 'board-' + tag + '-' + NOW); log('공지·일정', label, items.length + '건', '전체 주제'); };
   const item = x => ({ title: x.title || '', sub: x.atMs ? whenText(x, x.atMs) : '날짜 없는 공지', at: x.atMs || Number.MAX_SAFE_INTEGER });
 
   const fresh = await db.collection('board').where('pendingNew', '==', true).get();
@@ -112,7 +186,7 @@ async function rallies(){
     if (Object.keys(upd).length) await d.ref.update(upd);
   }
   const p = bundlePush('활동 동행 모집', recruit);
-  if (p){ const c = await pushTo(await everyone(), p.title, p.body, 'rally', 'rally-new-' + NOW); log('활동 모집', recruit.length + '건', c + '대'); }
+  if (p){ await sendAll(p.title, p.body, 'rally', 'rally-new-' + NOW); log('활동 모집', recruit.length + '건', '전체 주제'); }
   for (const ref of created) await ref.update({ 'sent.created': true });
 }
 
@@ -140,6 +214,7 @@ async function welcomes(){
       const where = m.area ? ` · ${m.area}${m.lead ? ' 대표' : ''}로 배치되었습니다` : '';
       const c = await pushTo([d.id], '의왕의힘 회원이 되셨습니다', `${m.name || ''}님 환영합니다${where}. 눌러서 앱을 홈 화면에 설치해 주세요.`, 'roadmap', 'welcome-' + d.id);
       log('가입 승인 알림', m.name, c + '대');
+      await db.doc('tokens/' + d.id).set({ topic: false }, { merge: true });   // 다음 실행에 ‘전체’ 주제 가입
     }
     await d.ref.update({ welcomed: true });
   }
@@ -232,9 +307,9 @@ async function facebook(){
   const snap = await db.collection('fbposts').where('notified', '==', false).get();
   for (const d of snap.docs){
     const p = d.data();
-    const c = await pushTo(await everyone(), '위원장님 페이스북 새 글', (p.text ? p.text + ' — ' : '') + '공유해서 더 많은 시민께 알려 주세요', 'news', 'fb-' + d.id);
+    await sendAll('위원장님 페이스북 새 글', (p.text ? p.text + ' — ' : '') + '공유해서 더 많은 시민께 알려 주세요', 'roadmap', 'fb-' + d.id);
     await d.ref.update({ notified: true });
-    log('페이스북 알림', c + '대');
+    log('페이스북 알림', '전체 주제');
   }
 }
 
@@ -257,7 +332,7 @@ async function resets(){
 }
 
 (async () => {
-  for (const [name, fn] of [['공지·일정', boardJob], ['유세', rallies], ['가입', applicants], ['페이스북', facebook], ['비밀번호', resets], ['승인 알림', welcomes], ['추천 의견', referralsJob], ['시민 옮기기', supMigrateJob], ['숫자 세기', statsJob], ['비밀번호 찾기', pwHelpJob]]){
+  for (const [name, fn] of [['주제 가입', topicSync], ['공지·일정', boardJob], ['유세', rallies], ['가입', applicants], ['페이스북', facebook], ['비밀번호', resets], ['승인 알림', welcomes], ['추천 의견', referralsJob], ['시민 옮기기', supMigrateJob], ['숫자 세기', statsJob], ['주제 탈퇴', topicOut], ['비밀번호 찾기', pwHelpJob]]){
     try { await fn(); } catch (e){ console.error(name + ' 처리 중 오류:', e.message); process.exitCode = 1; }
   }
 })();
