@@ -3,12 +3,12 @@
    1) 공지·일정(board): 새 글 · 하루 전 오전 9시 · 당일 오전 9시 · 1시간 전 · 회의록 → 승인 회원 전체
    2) 유세: 등록 직후 동행 모집 → 회원 전체 / 전날 오후 8시 · 집결 1시간 전 → 동행 신청자
    3) 가입 신청 → 최고 관리자와 검토자에게만
-   4) 위원장 페이스북 새 글 → 회원 전체 (페이스북 ‘페이지’ 연결 시 30분마다 새 글 자동 가져오기)
+   4) 위원장 블로그·페이스북 새 글 → 회원 전체 (30분마다 자동 가져오기, 홈 ‘위원장 소식’)
    5) 관리자가 요청한 회원 비밀번호 초기화
    6) 가입 승인 → 승인된 본인에게 ‘승인 완료’ 알림 (누르면 사이트가 열리고 홈 화면 설치 안내가 나옴) */
 const admin = require('firebase-admin');
 const crypto = require('crypto');
-const { kstDay, needsRecount, leaderStats, whenText, bundlePush, dueStage, supSplit, topicTarget, pushPayload, groupIdx } = require('./lib');
+const { kstDay, needsRecount, leaderStats, whenText, bundlePush, dueStage, supSplit, topicTarget, pushPayload, groupIdx, redact, FB_VER, safeSnsUrl, isoOf, parseRss, fbPost, pickNew } = require('./lib');
 
 if (!process.env.FIREBASE_SERVICE_ACCOUNT) { console.error('FIREBASE_SERVICE_ACCOUNT 비밀 값이 없습니다. 안내서 9단계를 확인하세요.'); process.exit(1); }
 admin.initializeApp({ credential: admin.credential.cert(JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT)) });
@@ -59,16 +59,21 @@ async function memberMap(uids){
 /* 토큰 문서들을 보고: 승인 회원·관리자면 주제 가입, 아니면 주제에서 뺌(전에 가입돼 있었을 수 있으므로 늘 뺌)
    표시(topic)는 가입·탈퇴가 끝난 뒤, 그사이 사이트가 새 토큰을 더했으면(문서가 바뀜) 배치가 실패해 다음 실행에 다시 함 */
 async function subscribeDocs(docs, r){
-  const mem = await memberMap(docs.map(d => d.id)), join = [], leave = [], b = db.batch();
+  const mem = await memberMap(docs.map(d => d.id)), join = [], owner = [], leave = [], b = db.batch();
   for (const d of docs){
     const t = topicTarget(mem[d.id] || null, d.id, r), toks = d.data().tokens || [];
-    (t === 'in' ? join : leave).push(...toks);
+    if (t === 'in'){ join.push(...toks); toks.forEach(() => owner.push(d.ref)); } else leave.push(...toks);
     b.update(d.ref, { topic: t === 'in' ? true : t }, { lastUpdateTime: d.updateTime });
   }
   let n = 0;
-  for (let i = 0; i < join.length; i += 1000) n += (await admin.messaging().subscribeToTopic(join.slice(i, i + 1000), 'all')).successCount;
+  const dead = [];
+  for (let i = 0; i < join.length; i += 1000){
+    const res = await admin.messaging().subscribeToTopic(join.slice(i, i + 1000), 'all'); n += res.successCount;
+    (res.errors || []).forEach(x => { const c = x.error && x.error.code; if (c === 'messaging/registration-token-not-registered' || c === 'messaging/invalid-registration-token') dead.push([owner[i + x.index], join[i + x.index]]); });
+  }
   for (let i = 0; i < leave.length; i += 1000) await admin.messaging().unsubscribeFromTopic(leave.slice(i, i + 1000), 'all');
   await b.commit();
+  for (const [ref, t] of dead) await ref.update({ tokens: admin.firestore.FieldValue.arrayRemove(t) }).catch(() => {});   // 끊긴 기기 토큰 정리
   return n;
 }
 /* 기존 기기 전체를 다 가입시키기 전에는 주제로 보내지 않음 (sendAll이 멈추고, 각 알림은 표시를 남기지 않아 다음 실행에 다시 감) */
@@ -295,33 +300,98 @@ async function supMigrateJob(){
   if (moved || dup) log('시민 옮김', moved + '건', '(중복 ' + dup + '건)');
 }
 
-/* 4) 페이스북 */
-async function facebook(){
-  const cfg = await db.doc('fbconfig/main').get();
-  if (cfg.exists){
-    const { pageId, token, lastRun } = cfg.data();
-    if (pageId && token && (!lastRun || NOW - Date.parse(lastRun) > 25 * 60000)){
-      try {
-        const res = await fetch(`https://graph.facebook.com/v19.0/${encodeURIComponent(pageId)}/posts?fields=id,message,permalink_url,created_time&limit=5&access_token=${encodeURIComponent(token)}`);
-        const json = await res.json();
-        if (!res.ok || json.error) throw new Error((json.error && json.error.message) || String(res.status));
-        for (const p of (json.data || []).reverse()){
-          if (!p.permalink_url) continue;
-          const ref = db.doc('fbposts/fb_' + String(p.id).replace(/[^0-9_]/g, ''));
-          if ((await ref.get()).exists) continue;
-          await ref.set({ url: p.permalink_url, text: (p.message || '').replace(/\s+/g, ' ').trim().slice(0, 120), source: 'auto', postedAt: p.created_time, notified: false, createdAt: new Date().toISOString() });
-          log('페이스북 새 글 가져옴', p.id);
-        }
-        await cfg.ref.update({ lastError: '', lastRun: new Date().toISOString() });
-      } catch (e){ await cfg.ref.update({ lastError: String(e.message || e), lastRun: new Date().toISOString() }); log('페이스북 가져오기 실패', e.message); }
-    }
+/* 4) 위원장 SNS: 블로그 RSS · 페이스북 페이지 → snsposts/{blog_글번호 | fb_글ID} (30분마다) → 회원에게 '공유해 주세요' 알림
+   설정·상태는 fbconfig/main (최고 관리자만 읽고 씀): blogId · pageId · token · ver(선택) · blogLastRun/blogLastError · fbLastRun/lastRun/lastError
+   blogSeen/fbSeen = 지금까지 저장한 가장 새 글 시각 — 매번 RSS 50개를 다시 쓰려 하지 않게 */
+const SNS_GAP = 25 * 60000;
+let _snsCfg = null;   // 한 번 실행에 한 번만 읽음 (블로그·페이스북·옮기기가 같이 씀)
+const snsCfg = async () => { if (!_snsCfg){ const ref = db.doc('fbconfig/main'), s = await ref.get(); _snsCfg = { ref, d: s.exists ? s.data() : {} }; } return _snsCfg; };
+const newest = (items, from) => items.reduce((m, x) => (x.postedAt > m ? x.postedAt : m), from || '');
+const errText = e => String((e && e.message) || e).slice(0, 300);
+/* 문서 이름이 글 번호라 create는 한 번만 성공 (실행이 겹쳐도 같은 글을 두 번 저장·알림하지 않음) */
+async function saveSns(items){
+  let n = 0;
+  for (const x of items){
+    try {
+      await db.doc('snsposts/' + x.id).create({ src: x.id.startsWith('fb_') ? 'fb' : 'blog', url: x.url, title: x.title, thumb: x.thumb, postedAt: x.postedAt, notified: x.notified, createdAt: new Date().toISOString() });
+      n++;
+    } catch (e){ if (e.code !== 6) throw e; }   // 6 = 이미 있음
   }
-  const snap = await db.collection('fbposts').where('notified', '==', false).get();
-  for (const d of snap.docs){
-    const p = d.data();
-    await sendAll('위원장님 페이스북 새 글', (p.text ? p.text + ' — ' : '') + '공유해서 더 많은 시민께 알려 주세요', 'roadmap', 'fb-' + d.id);
-    await d.ref.update({ notified: true });
-    log('페이스북 알림', '전체 주제');
+  return n;
+}
+/* 첫 화면 SNS 줄 ‘N’ 표시용: 출처별 가장 새 글을 public/sns에 (누구나 읽는 문서, 새 글이 있을 때만 씀) */
+async function markNew(key, pick){
+  if (!pick.length) return;
+  const top = pick.reduce((m, x) => (x.postedAt > m.postedAt ? x : m), pick[0]);
+  await db.doc('public/sns').set({ [key]: { url: top.url, at: top.postedAt, title: Array.from(top.title).slice(0, 60).join('') } }, { merge: true });
+}
+async function blog(){
+  const { ref, d } = await snsCfg();
+  if (d.blogLastRun && NOW - Date.parse(d.blogLastRun) < SNS_GAP) return;
+  const id = /^[A-Za-z0-9_-]{1,40}$/.test(d.blogId || '') ? d.blogId : 'choikisik007';
+  const at = new Date().toISOString();
+  try {
+    const res = await fetch('https://rss.blog.naver.com/' + id + '.xml', { headers: { 'User-Agent': 'uiwang-alarm' }, signal: AbortSignal.timeout(15000) });   // 멈춘 연결이 5분 실행 전체를 막지 않게
+    if (!res.ok) throw new Error('RSS ' + res.status);
+    const all = parseRss(await res.text());
+    if (!all.length) throw new Error('RSS에서 글을 찾지 못했습니다 (블로그 아이디를 확인해 주세요)');
+    const first = !d.blogSeen || (d.blogSeenFor || 'choikisik007') !== id;   // 블로그 아이디를 바꾸면 그 블로그는 처음처럼(알림 없이)
+    const pick = pickNew(all.filter(x => first || x.postedAt > d.blogSeen), first, NOW);   // 처음(성공한 적 없음)이면 최신 10개를 알림 없이 — 실패한 실행은 blogSeen을 남기지 않음
+    const n = await saveSns(pick);
+    await ref.set({ blogLastRun: at, blogLastError: '', blogSeen: newest(pick, first ? '' : d.blogSeen), blogSeenFor: id }, { merge: true });
+    await markNew('nbNew', pick);
+    if (n) log('블로그 새 글', n + '건');
+  } catch (e){ await ref.set({ blogLastRun: at, blogLastError: errText(e) }, { merge: true }); log('블로그 가져오기 실패', errText(e)); }
+}
+async function facebook(){
+  const { ref, d } = await snsCfg();
+  if (!d.pageId || !d.token) return;
+  if (d.fbLastRun && NOW - Date.parse(d.fbLastRun) < SNS_GAP) return;
+  const ver = /^v\d{2}\.0$/.test(d.ver || '') ? d.ver : FB_VER;
+  const at = new Date().toISOString();
+  try {
+    const res = await fetch(`https://graph.facebook.com/${ver}/${encodeURIComponent(d.pageId)}/posts?fields=id,message,permalink_url,created_time,full_picture&limit=5&access_token=${encodeURIComponent(d.token)}`, { signal: AbortSignal.timeout(15000) });
+    const json = await res.json();
+    if (!res.ok || json.error) throw new Error((json.error && json.error.message) || String(res.status));
+    const got = (json.data || []).map(fbPost).filter(Boolean);
+    if ((json.data || []).length && !got.length) throw new Error('페이스북 글 형식을 읽지 못했습니다 (주소·날짜를 찾지 못함)');
+    const firstFb = !d.fbSeen || (d.fbSeenFor || '') !== String(d.pageId);   // 페이지를 바꾸면 그 페이지는 처음처럼(알림 없이)
+    const items = got.filter(x => firstFb || x.postedAt > d.fbSeen);
+    const pick = pickNew(items, firstFb, NOW);   // 성공한 적 없으면(토큰 만료 뒤 고친 경우 포함) 알림 없이
+    const n = await saveSns(pick);
+    await ref.set({ fbLastRun: at, lastRun: at, lastError: '', fbSeen: newest(pick, firstFb ? '' : d.fbSeen) || at, fbSeenFor: String(d.pageId) }, { merge: true });
+    await markNew('fbNew', pick);   // 글이 없는 페이지도 ‘한 번 성공’으로 표시
+    if (n) log('페이스북 새 글', n + '건');
+  } catch (e){ const msg = redact(String((e && e.message) || e), d.token).slice(0, 300);   // 오류 글에 토큰이 섞여도 가림
+    await ref.set({ fbLastRun: at, lastRun: at, lastError: msg }, { merge: true }); log('페이스북 가져오기 실패', msg); }
+}
+/* 예전 페이스북 글(fbposts)을 한 번만 snsposts로 복사 (원본은 둠, 알림은 다시 안 감) */
+async function snsMove(){
+  const { ref, d } = await snsCfg();
+  if (d.snsMoved) return;
+  const snap = await db.collection('fbposts').get(); let moved = 0;
+  for (const doc of snap.docs){
+    const p = doc.data(), url = safeSnsUrl(p.url), postedAt = isoOf(p.postedAt) || isoOf(p.createdAt);
+    if (!url || !postedAt) continue;
+    try { moved++; await db.doc('snsposts/' + doc.id).create({ src: 'fb', url, title: Array.from(String(p.text || '')).slice(0, 120).join('') || '페이스북에 새 글이 올라왔습니다', thumb: '', postedAt, notified: true, createdAt: p.createdAt || new Date().toISOString() }); }
+    catch (e){ if (e.code !== 6) throw e; }
+  }
+  await ref.set({ snsMoved: true }, { merge: true });
+  if (moved) log('예전 페이스북 글 옮김', moved + '건', '(건너뜀 ' + (snap.size - moved) + '건)');
+}
+/* 새 글 알림: 출처별로 묶어 한 번 */
+async function snsNotify(){
+  const snap = await db.collection('snsposts').where('notified', '==', false).limit(20).get();
+  if (snap.empty) return;
+  const by = { blog: [], fb: [] };
+  snap.docs.forEach(d => { const p = d.data(); (p.src === 'fb' ? by.fb : by.blog).push({ ref: d.ref, at: -(Date.parse(p.postedAt) || 0),   // 묶음 제목은 가장 새 글
+      title: p.title || '새 글', sub: '공유해서 더 많은 시민께 알려 주세요' }); });
+  for (const [src, label] of [['blog', '위원장님 블로그 새 글'], ['fb', '위원장님 페이스북 새 글']]){
+    const items = by[src]; if (!items.length) continue;
+    const p = bundlePush(label, items);
+    await sendAll(p.title, p.body, 'roadmap', 'sns-' + src);   // 회원 전체: ‘전체’ 주제로 한 번
+    const b = db.batch(); items.forEach(x => b.update(x.ref, { notified: true })); await b.commit();
+    log(label + ' 알림', items.length + '건', '전체 주제');
   }
 }
 
@@ -344,7 +414,7 @@ async function resets(){
 }
 
 (async () => {
-  for (const [name, fn] of [['주제 가입', topicSync], ['공지·일정', boardJob], ['유세', rallies], ['가입', applicants], ['페이스북', facebook], ['비밀번호', resets], ['승인 알림', welcomes], ['추천 의견', referralsJob], ['시민 옮기기', supMigrateJob], ['숫자 세기', statsJob], ['주제 탈퇴', topicOut], ['비밀번호 찾기', pwHelpJob]]){
+  for (const [name, fn] of [['주제 가입', topicSync], ['공지·일정', boardJob], ['유세', rallies], ['가입', applicants], ['SNS 옮기기', snsMove], ['블로그', blog], ['페이스북', facebook], ['SNS 알림', snsNotify], ['비밀번호', resets], ['승인 알림', welcomes], ['추천 의견', referralsJob], ['시민 옮기기', supMigrateJob], ['숫자 세기', statsJob], ['주제 탈퇴', topicOut], ['비밀번호 찾기', pwHelpJob]]){
     try { await fn(); } catch (e){ console.error(name + ' 처리 중 오류:', e.message); process.exitCode = 1; }
   }
 })();

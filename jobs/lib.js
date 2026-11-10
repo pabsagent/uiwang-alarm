@@ -86,11 +86,53 @@ function pushPayload(title, body, view, tag){
 }
 
 /* 7C: 단체별 이름 목록 — public/lib/text.js groupIdx와 같은 규칙 (한쪽을 바꾸면 다른 쪽도) */
-const GROUP_IDX_MAX = 15000;
+const GROUP_IDX_MAX = 12000;
 function groupIdx(members, group){
   const all = (members || []).filter(m => m.status === 'approved' && (m.groups || []).includes(group))
-    .map(m => ({ id: m.id, name: m.name || '' })).sort((a, b) => a.name.localeCompare(b.name, 'ko'));
+    .map(m => ({ id: m.id, name: m.name || '', dong: m.dong || '' })).sort((a, b) => a.name.localeCompare(b.name, 'ko'));
   return { members: all.slice(0, GROUP_IDX_MAX), more: all.length > GROUP_IDX_MAX };
 }
 
-module.exports = { groupIdx, topicTarget, pushPayload, kstDay, needsRecount, gradeOf, leaderStats, whenText, bundlePush, dueStage, supSplit };
+/* ===== 6단계: 위원장 SNS (블로그 RSS · 페이스북 페이지) =====
+   페이스북 Graph API 버전: 2026-11-10 Meta 변경 기록 확인 — v19.0은 2026-05-21 만료, 날짜가 적힌 최신은 v26.0(2026-07-29 출시).
+   바꿔야 하면 Firestore fbconfig/main.ver에 'v27.0'처럼 넣으면 코드를 다시 올리지 않아도 됨 */
+const FB_VER = 'v26.0';
+const SNS_HOSTS = ['blog.naver.com', 'm.blog.naver.com', 'www.facebook.com', 'facebook.com', 'm.facebook.com'];
+const urlOf = u => { try { const x = new URL(String(u || '')); return x.protocol === 'https:' ? x : null; } catch (e){ return null; } };
+/* 원문 주소: https + 네이버 블로그·페이스북만 (그 밖은 '') */
+const safeSnsUrl = u => { const x = urlOf(u); return x && SNS_HOSTS.includes(x.hostname) ? x.href : ''; };
+/* 썸네일: https + 네이버 블로그 썸네일·페이스북 이미지 서버만 */
+const safeThumb = u => { const x = urlOf(u); return x && (x.hostname === 'blogthumb.pstatic.net' || x.hostname.endsWith('.fbcdn.net')) ? x.href : ''; };
+const cleanTitle = t => String(t || '').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, '&').replace(/\s+/g, ' ').trim();
+const cut120 = t => Array.from(t).slice(0, 120).join('');   // 이모지를 반으로 자르지 않게 (글자 단위)
+const isoOf = t => { const ms = Date.parse(String(t || '').replace(/([+-]\d{2})(\d{2})$/, '$1:$2')); return isNaN(ms) ? '' : new Date(ms).toISOString(); };
+/* 네이버 블로그 RSS → 글 목록 (모양이 고정이라 정규식으로 읽음) */
+function parseRss(xml){
+  const tag = (b, n) => { const m = b.match(new RegExp('<' + n + '>([\\s\\S]*?)</' + n + '>')); if (!m) return ''; const c = m[1].trim().match(/^<!\[CDATA\[([\s\S]*?)\]\]>$/); return c ? c[1] : m[1].trim(); };
+  const out = [];
+  for (const m of String(xml || '').matchAll(/<item>([\s\S]*?)<\/item>/g)){
+    const b = m[1], guid = tag(b, 'guid') || tag(b, 'link').split('?')[0];
+    const url = safeSnsUrl(guid), no = (guid.match(/\/(\d+)\/?$/) || [])[1], postedAt = isoOf(tag(b, 'pubDate'));
+    if (!url || !no || !postedAt) continue;
+    const img = (tag(b, 'description').match(/<img[^>]+src=["']([^"']+)["']/) || [])[1];
+    out.push({ id: 'blog_' + no, url, title: cut120(cleanTitle(tag(b, 'title'))) || '블로그에 새 글이 올라왔습니다', thumb: safeThumb(img), postedAt });
+  }
+  return out;
+}
+/* 페이스북 페이지 글 → 같은 모양 (주소가 허용되지 않으면 null) */
+function fbPost(p){
+  const url = safeSnsUrl(p && p.permalink_url), postedAt = isoOf(p && p.created_time), id = String((p && p.id) || '').replace(/[^0-9_]/g, '');
+  if (!url || !postedAt || !id) return null;
+  return { id: 'fb_' + id, url, title: cut120(cleanTitle(p.message)) || '페이스북에 새 글이 올라왔습니다', thumb: safeThumb(p.full_picture), postedAt };
+}
+/* 저장할 글 고르기: 처음이면 최신 10개를 알림 없이, 그 뒤는 전부(올린 지 3일 넘은 글은 알림 없이) */
+function pickNew(items, first, nowMs){
+  const s = items.slice().sort((a, b) => (a.postedAt < b.postedAt ? 1 : a.postedAt > b.postedAt ? -1 : 0));
+  if (first) return s.slice(0, 10).map(x => Object.assign({}, x, { notified: true }));
+  return s.map(x => Object.assign({}, x, { notified: nowMs - Date.parse(x.postedAt) > 3 * 86400000 }));
+}
+
+/* 오류 글에서 비밀 값(페이지 토큰)을 *** 로 가림 — 실행 기록(Actions)은 공개될 수 있음 */
+const redact = (text, secret) => (secret ? String(text).split(secret).join('***') : String(text));
+
+module.exports = { redact, groupIdx, topicTarget, pushPayload, kstDay, needsRecount, gradeOf, leaderStats, whenText, bundlePush, dueStage, supSplit, FB_VER, safeSnsUrl, safeThumb, isoOf, parseRss, fbPost, pickNew };
