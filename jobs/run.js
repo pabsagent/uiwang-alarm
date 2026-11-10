@@ -7,7 +7,7 @@
    6) 가입 승인 → 승인된 본인에게 ‘승인 완료’ 알림 (누르면 사이트가 열리고 홈 화면 설치 안내가 나옴) */
 const admin = require('firebase-admin');
 const crypto = require('crypto');
-const { kstDay, needsRecount, leaderStats, whenText, bundlePush, dueStage } = require('./lib');
+const { kstDay, needsRecount, leaderStats, whenText, bundlePush, dueStage, supSplit } = require('./lib');
 
 if (!process.env.FIREBASE_SERVICE_ACCOUNT) { console.error('FIREBASE_SERVICE_ACCOUNT 비밀 값이 없습니다. 안내서 9단계를 확인하세요.'); process.exit(1); }
 admin.initializeApp({ credential: admin.credential.cert(JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT)) });
@@ -185,6 +185,29 @@ async function statsJob(){
   log('리더 숫자 다시 셈', leaders + '명');
 }
 
+/* 10) 옛 함께하는 시민 문서(문서 이름 = 전화번호) → 가린 번호 문서 + supKeys. 원본은 supportersOld에 백업.
+   이미 같은 번호의 supKeys가 있으면(중복 등록) 새 문서를 만들지 않고 백업만. 옛 문서가 없으면 읽기 1건으로 끝남 */
+async function supMigrateJob(){
+  const snap = await db.collection('supporters').orderBy(admin.firestore.FieldPath.documentId()).startAt('01').endBefore('02').limit(300).get();
+  let moved = 0, dup = 0;
+  for (const d of snap.docs){
+    const r = supSplit(d.id, d.data()); if (!r) continue;
+    // 백업 이름에 시각을 붙여 같은 번호가 다시 옮겨져도 앞 백업을 덮어쓰지 않음.
+    // 옛 문서는 읽은 뒤 바뀌지 않았을 때만 지움(그사이 회원이 지웠으면 이번 일괄 작업 전체가 취소됨)
+    const backup = bt => { bt.set(db.doc('supportersOld/' + d.id + '_' + NOW), d.data()); bt.delete(d.ref, { lastUpdateTime: d.updateTime }); };
+    const ref = db.collection('supporters').doc(), bt = db.batch();
+    bt.set(ref, r.sup); bt.set(db.doc('supLinks/' + ref.id), r.link);
+    bt.create(db.doc('supKeys/' + r.key), Object.assign({}, r.keyDoc, { sup: ref.id }));   // 이미 있으면(중복 등록) 실패
+    backup(bt);
+    try { await bt.commit(); moved++; }
+    catch (e){
+      if (e.code !== 6) throw e;   // 6 = ALREADY_EXISTS: 같은 번호가 이미 새 명단에 있음 → 새 문서 없이 백업만
+      const b2 = db.batch(); backup(b2); await b2.commit(); dup++;
+    }
+  }
+  if (moved || dup) log('시민 옮김', moved + '건', '(중복 ' + dup + '건)');
+}
+
 /* 4) 페이스북 */
 async function facebook(){
   const cfg = await db.doc('fbconfig/main').get();
@@ -234,7 +257,7 @@ async function resets(){
 }
 
 (async () => {
-  for (const [name, fn] of [['공지·일정', boardJob], ['유세', rallies], ['가입', applicants], ['페이스북', facebook], ['비밀번호', resets], ['승인 알림', welcomes], ['추천 의견', referralsJob], ['숫자 세기', statsJob], ['비밀번호 찾기', pwHelpJob]]){
+  for (const [name, fn] of [['공지·일정', boardJob], ['유세', rallies], ['가입', applicants], ['페이스북', facebook], ['비밀번호', resets], ['승인 알림', welcomes], ['추천 의견', referralsJob], ['시민 옮기기', supMigrateJob], ['숫자 세기', statsJob], ['비밀번호 찾기', pwHelpJob]]){
     try { await fn(); } catch (e){ console.error(name + ' 처리 중 오류:', e.message); process.exitCode = 1; }
   }
 })();

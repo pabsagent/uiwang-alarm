@@ -49,4 +49,21 @@ function dueStage(p, now){
   return { send: due.length ? due[due.length - 1].k : null, mark: skip.concat(due).map(s => s.k) };
 }
 
-module.exports = { kstDay, needsRecount, gradeOf, leaderStats, whenText, bundlePush, dueStage };
+/* 옛 함께하는 시민 문서(문서 이름 = 전화번호, 전체 번호가 그대로 있음) → 가린 번호 문서 + supKeys 문서.
+   화면의 supRecord(public/lib/text.js)와 같은 모양. 이미 새 모양이거나 이름이 전화번호가 아니면 null */
+const PHONE_ID = /^01[016789]\d{7,8}$/;
+function maskPhone(p){
+  const d = String(p || '').replace(/\D/g, ''); if (!PHONE_ID.test(d)) return '';
+  return d.slice(0, 3) + '-' + '*'.repeat(d.length - 7) + '-' + d.slice(-4);
+}
+function supSplit(id, d){
+  if (!PHONE_ID.test(id) || d.phoneMasked) return null;
+  const phone = d.phone || id;
+  const sup = { name: d.name || '', phoneMasked: maskPhone(phone), dong: d.dong || '', gender: d.gender || '', ageBand: d.ageBand || '',
+    by: d.by || '', byName: d.byName || '', createdAt: d.createdAt || '' };
+  const link = { key: id, by: d.by || '' }, keyDoc = { by: d.by || '', phone };
+  if (d.via){ sup.via = d.via; link.via = d.via; keyDoc.via = d.via; }
+  return { key: id, sup, link, keyDoc };
+}
+
+module.exports = { kstDay, needsRecount, gradeOf, leaderStats, whenText, bundlePush, dueStage, supSplit };
