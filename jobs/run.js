@@ -8,7 +8,7 @@
    6) 가입 승인 → 승인된 본인에게 ‘승인 완료’ 알림 (누르면 사이트가 열리고 홈 화면 설치 안내가 나옴) */
 const admin = require('firebase-admin');
 const crypto = require('crypto');
-const { kstDay, needsRecount, leaderStats, whenText, bundlePush, dueStage, supSplit, topicTarget, pushPayload } = require('./lib');
+const { kstDay, needsRecount, leaderStats, whenText, bundlePush, dueStage, supSplit, topicTarget, pushPayload, groupIdx } = require('./lib');
 
 if (!process.env.FIREBASE_SERVICE_ACCOUNT) { console.error('FIREBASE_SERVICE_ACCOUNT 비밀 값이 없습니다. 안내서 9단계를 확인하세요.'); process.exit(1); }
 admin.initializeApp({ credential: admin.credential.cert(JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT)) });
@@ -248,7 +248,7 @@ async function statsJob(){
   /* 리더 33인 모집 현황 (가입 링크가 리더/일반 신청서 중 무엇을 열지 정함)
      회원 전체를 5분마다 읽으면 무료 한도가 바닥나므로, 한국 날짜로 하루 1번 리더 후보만 읽음.
      평소에는 관리자 화면이 승인·배치할 때 public/stats를 바로 고침 */
-  if (!needsRecount(st.exists ? st.data().countedDay : undefined, NOW)) return;
+  if (!needsRecount(st.exists ? st.data().countedDay : undefined, NOW) && st.exists && st.data().membersAt !== undefined) return;   // 알림 도우미가 한 번도 세지 않았으면(7C 처음) 오늘 이미 셌어도 다시 셈
   const [byGrade, byArea] = await Promise.all([
     db.collection('members').where('grade', 'in', ['leader', 'chair', 'sec']).get(),
     db.collection('members').where('area', '!=', '').get(),
@@ -256,8 +256,20 @@ async function statsJob(){
   const docs = [...new Map([...byGrade.docs, ...byArea.docs].map(d => [d.id, { id: d.id, data: d.data() }])).values()];
   const { leaders, lr } = leaderStats(docs, await roles());
   await db.doc('public/stats').set({ leaders, lr, at: new Date().toISOString() });
-  await db.doc('stats/main').set({ countedDay: kstDay(NOW) }, { merge: true });
-  log('리더 숫자 다시 셈', leaders + '명');
+  /* 7C: 회원 수(승인)·시민 링크 가입 회원 수, 단체별 이름 목록 — 회원이 스스로 고친 이름도 하루 1번 반영 */
+  const [mc, vc] = await Promise.all([
+    db.collection('members').where('status', '==', 'approved').count().get(),
+    db.collection('members').where('status', '==', 'approved').where('viaSup', '==', true).count().get()]);
+  /* 숫자를 먼저 씀 (단체 목록에서 오류가 나도 다음 실행이 비싼 셈을 되풀이하지 않게) */
+  await db.doc('stats/main').set({ countedDay: kstDay(NOW), members: mc.data().count, viaSup: vc.data().count, membersAt: new Date().toISOString() }, { merge: true });
+  const cfg = await db.doc('config/main').get(), gs = ((cfg.exists && cfg.data().groups) || []).filter(g => typeof g === 'string' && g);
+  for (const g of gs){
+    try {
+      const s = await db.collection('members').where('groups', 'array-contains', g).get();
+      await db.doc('groupsIdx/g_' + encodeURIComponent(g)).set(Object.assign(groupIdx(s.docs.map(d => Object.assign({ id: d.id }, d.data())), g), { name: g, at: new Date().toISOString() }));
+    } catch (e){ log('단체 이름 목록 실패', g, e.message); }
+  }
+  log('리더 숫자 다시 셈', leaders + '명', '승인 회원 ' + mc.data().count + '명', '단체 ' + gs.length + '개');
 }
 
 /* 10) 옛 함께하는 시민 문서(문서 이름 = 전화번호) → 가린 번호 문서 + supKeys. 원본은 supportersOld에 백업.

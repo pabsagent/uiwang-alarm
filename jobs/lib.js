@@ -85,4 +85,12 @@ function pushPayload(title, body, view, tag){
   };
 }
 
-module.exports = { topicTarget, pushPayload, kstDay, needsRecount, gradeOf, leaderStats, whenText, bundlePush, dueStage, supSplit };
+/* 7C: 단체별 이름 목록 — public/lib/text.js groupIdx와 같은 규칙 (한쪽을 바꾸면 다른 쪽도) */
+const GROUP_IDX_MAX = 15000;
+function groupIdx(members, group){
+  const all = (members || []).filter(m => m.status === 'approved' && (m.groups || []).includes(group))
+    .map(m => ({ id: m.id, name: m.name || '' })).sort((a, b) => a.name.localeCompare(b.name, 'ko'));
+  return { members: all.slice(0, GROUP_IDX_MAX), more: all.length > GROUP_IDX_MAX };
+}
+
+module.exports = { groupIdx, topicTarget, pushPayload, kstDay, needsRecount, gradeOf, leaderStats, whenText, bundlePush, dueStage, supSplit };
